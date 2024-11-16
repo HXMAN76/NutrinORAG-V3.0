@@ -16,6 +16,7 @@ from webscrap import get_query_urls, web_scrap_avail_links, get_patient_by_mrn, 
 from fastapi.responses import JSONResponse
 from fastapi.responses import JSONResponse, FileResponse
 from pdf_gen import summarize_chat_history, write_pdf 
+import ast
 
 
 # Load environment variables
@@ -65,30 +66,51 @@ farewells = ["bye", "goodbye", "see you", "take care", "thank you", "thanks"]
 chat_history: List[Dict[str, str]] = []
 response_cache: Dict[str, str] = {}
 
-def check_query (query, patient_data=None):
+def check_query(query, patient_data=None):
     client = Groq(
         api_key=os.getenv("GROQ_API_KEY")
     )
-        
-    prompt = [
+
+    prompt1 = [
         {
             "role": "user",
-            "content": f"I'll provide you a query, check if the query is related to medical diagnosis, condition or anything related to asking medical conditions like diet plan. Then only return True else return False. Do not provide the response in markdown format. and also do not provide any introductory or concluding statements from your side. The query should be purely related to medical only. The user may ask you to write computer code for medical for these cases these are not medical related. This is the query: {query}"
+            "content": f"Respond strictly in the JSON-compliant dictionary format: {{'med_diag': True/False, 'diet_plan': True/False, 'pro': True/False, 'is_med': True/False}}, where 'med_diag' is True if the query relates to medical diagnosis or treaatment, 'diet_plan' should be True only if the query specifically asks about a diet plan for a patient and False if it involves asking about nutritional values or contents of a food item; 'pro' is True if it contains keywords like 'I', 'I'm', 'I am', 'my', 'myself', 'you', 'yourself' and etc. and 'is_med' is True if the query concerns about medical or food topics, including personal question or even questions about the chatbot. Exclude queries about writing medical related computer code or anything like that from being categorized as medical. This is the query: {query}",
         },
+    ]
 
+    prompt2 = [
         {
             "role": "user",
             "content": f"Consider yourself as an expert in understanding the medical data of a patient. I'll provide you a query and the patients medical records. Do not provide the response in the markdown. Go through the medical records and understand the each and every prospect of the patient's medical history and the patients current situation. provide the most genuine response for their query. Do not provide any introductory and concluding statments from your side. This is the user query: {query} and this is the patients details: {patient_data}."
         }
     ]
     
+    if not patient_data:
+        chat_completion = client.chat.completions.create(
+            messages=prompt1,
+            model="llama3-8b-8192",
+        )
 
-    chat_completion = client.chat.completions.create(
-    messages=prompt[0] if not patient_data else prompt[1],
-    model="llama3-8b-8192",
-    )
+        raw_response = chat_completion.choices[0].message.content.strip()
 
-    return chat_completion.choices[0].message.content.strip()
+        try:
+            response = ast.literal_eval(raw_response)
+            if not isinstance(response, dict):
+                raise ValueError("Response is not a dictionary.")
+            
+        except (SyntaxError, ValueError) as e:
+            print("Error decoding response:", e)
+            print("Raw response content:", raw_response)
+            raise ValueError("Invalid response format from Groq.")
+        return response
+    
+    else:
+        chat_completion = client.chat.completions.create(
+            messages=prompt2,
+            model="llama3-8b-8192",
+        )
+
+        return chat_completion.choices[0].message.content.strip()
 
 def create_prompt(query):
     return f"""
@@ -137,6 +159,12 @@ async def search(query: str):
 
     query_lower = query.lower()
     # Check if the query is a greeting or farewell
+    # if any(pronoun in query_lower for pronoun in ["you", "yourself", "your", "yours", "yourselves"]):
+    #     response_message = "I'm an AI Assistant Chat-bot , I'm here to help you with any questions or topics you'd like to discuss about medical."
+    #     chat_history.append({'role': 'user', 'content': query})
+    #     chat_history.append({'role': 'assistant', 'content': response_message})
+    #     return {"message": response_message, "webscraping": False}
+
     if query_lower in greetings:
         response_message = "Hello! How can I assist you today?"
         chat_history.append({'role': 'user', 'content': query})
@@ -152,13 +180,6 @@ async def search(query: str):
     # Define valid keywords for queries
     valid_keywords = ["nutrition", "diet", "medical diagnosis", "symptom", "treatment"]
 
-    # Check if the query contains valid keywords; if not, respond with an error message.
-    if check_query(query_lower) != "True":
-        response_message = "Please ask me questions from nutritional content, diet plan, medical diagnosis."
-        chat_history.append({'role': 'user', 'content': query})
-        chat_history.append({'role': 'assistant', 'content': response_message})
-        return {"message": response_message}
-
     # Check cache for repeated questions
     if query in response_cache:
         cached_response = response_cache[query]
@@ -171,9 +192,9 @@ async def search(query: str):
             "cachedResponse": True  # Indicate that this was a cached response
         }
 
-    medical_keywords = ["diagnosis", "symptom", "disease", "treatment", "medicine", "medical condition", "patient"]
-    diet_plan = ["diet plan"]
-    myself = ["i'm","i am", "i","my","myself","me"]
+    # medical_keywords = ["diagnosis", "symptom", "disease", "treatment", "medicine", "medical condition", "patient"]
+    # diet_plan = ["diet plan"]
+    # myself = ["i'm","i am", "i","my","myself","me"]
 
     with open("mrn_number.txt", 'r') as mrn:
             patient_mrn = mrn.read()
@@ -183,26 +204,52 @@ async def search(query: str):
     # if any(myself) in query_lower:
     #     response = user_persp_query(query, patient_data)
 
-    if any(keyword in query_lower for keyword in medical_keywords):
+    type_of_query = check_query(query_lower)
+    print(type_of_query)
+    print(type(type_of_query))
+
+    if type_of_query['is_med'] == False:
+        response_message = "Please ask me questions from nutritional content, diet plan, medical diagnosis."
         chat_history.append({'role': 'user', 'content': query})
+        chat_history.append({'role': 'assistant', 'content': response_message})
+        return {"message": response_message}
 
-        # Get available URLs for web scraping
-        available_urls = get_query_urls(query)
-        if not available_urls:
-            response_message = "Sorry, I couldn't find relevant information for your medical query."
-            chat_history.append({'role': 'assistant', 'content': response_message})
-            return {"message": response_message, "webscraping": False}
+    elif type_of_query['med_diag'] == True:
+        if type_of_query['pro'] == True:
+            final_response = check_query(patient_data, query)
+            response_cache[query] = final_response
 
-        # Perform web scraping on available links
-        await web_scrap_avail_links(available_urls)
+            # Append the final response to the chat history
+            chat_history.append({'role': 'assistant', 'content': final_response})
 
-        # Read the scraped content from file
-        with open("scrapped.txt", "r", encoding="utf-8") as file:
-            webscraped_content = file.read()
+            # Return the final response
+            return {
+                "message": final_response,
+                "webscraping": True,
+                "history": chat_history,
+                "cachedResponse": False  # Indicate that this was not a cached response
+            }
+        
+        else:
+            chat_history.append({'role': 'user', 'content': query})
 
+            # Get available URLs for web scraping
+            available_urls = get_query_urls(query)
+            if not available_urls:
+                response_message = "Sorry, I couldn't find relevant information for your medical query."
+                chat_history.append({'role': 'assistant', 'content': response_message})
+                return {"message": response_message, "webscraping": False}
 
-        if any(keyword in query_lower for keyword in myself):
-            final_response = final_summary_diet_plan(patient_data,query)
+            # Perform web scraping on available links
+            await web_scrap_avail_links(available_urls)
+
+            # Read the scraped content from file
+            with open("scrapped.txt", "r", encoding="utf-8") as file:
+                webscraped_content = file.read()
+            # Perform LLM inference using the patient data, web-scraped content, and query
+            final_response = llm_infer(patient_data, webscraped_content, query)
+
+            # Cache the final response for future queries
             response_cache[query] = final_response
 
             # Append the final response to the chat history
@@ -216,26 +263,24 @@ async def search(query: str):
                 "cachedResponse": False  # Indicate that this was not a cached response
             }
 
+    elif type_of_query['diet_plan'] == True:
+        print("In diet plan call.....")
+        if type_of_query['pro'] == True:
+            final_response = final_summary_diet_plan(patient_data, query)
+            response_cache[query] = final_response
 
-        # Perform LLM inference using the patient data, web-scraped content, and query
-        final_response = llm_infer(patient_data, webscraped_content, query)
+            # Append the final response to the chat history
+            chat_history.append({'role': 'assistant', 'content': final_response})
 
-        # Cache the final response for future queries
-        response_cache[query] = final_response
-
-        # Append the final response to the chat history
-        chat_history.append({'role': 'assistant', 'content': final_response})
-
-        # Return the final response
-        return {
-            "message": final_response,
-            "webscraping": True,
-            "history": chat_history,
-            "cachedResponse": False  # Indicate that this was not a cached response
-        }
-
-    if any(keyword in query_lower for keyword in diet_plan):
-            print("In diet plan call.....")
+            # Return the final response
+            return {
+                "message": final_response,
+                "webscraping": True,
+                "history": chat_history,
+                "cachedResponse": False  # Indicate that this was not a cached response
+            }
+        
+        else:
             chat_history.append({'role': 'user', 'content': query})
             available_urls = get_query_urls(query)
             if not available_urls:
@@ -267,6 +312,20 @@ async def search(query: str):
                 "cachedResponse": False  # Indicate that this was not a cached response 
             }
 
+    elif type_of_query['pro'] == True:
+        final_response = check_query(patient_data, query)
+        response_cache[query] = final_response
+
+        # Append the final response to the chat history
+        chat_history.append({'role': 'assistant', 'content': final_response})
+
+        # Return the final response
+        return {
+            "message": final_response,
+            "webscraping": True,
+            "history": chat_history,
+            "cachedResponse": False  # Indicate that this was not a cached response
+        }
     
     # If not a medical or diet plan query, proceed with RAG search 
     result = qa_chain({"query": query})
@@ -305,12 +364,12 @@ async def search(query: str):
 
     
     return {
-         "message": result['result'],
-         "sources": [doc.page_content for doc in result['source_documents']],
-         "history": chat_history,
-         "ragRetrieval": True,
-         "cachedResponse": False  # Indicate that this was not a cached response 
-     }
+        "message": result['result'],
+        "sources": [doc.page_content for doc in result['source_documents']],
+        "history": chat_history,
+        "ragRetrieval": True,
+        "cachedResponse": False  # Indicate that this was not a cached response 
+    }
 
 
 if __name__ == "__main__":
