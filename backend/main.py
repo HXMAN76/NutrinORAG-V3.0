@@ -180,8 +180,8 @@ async def search(query: str):
     
     patient_data = get_patient_by_mrn(patient_mrn)
 
-    if any(myself) in query_lower:
-        response = user_persp_query(query, patient_data)
+    # if any(myself) in query_lower:
+    #     response = user_persp_query(query, patient_data)
 
     if any(keyword in query_lower for keyword in medical_keywords):
         chat_history.append({'role': 'user', 'content': query})
